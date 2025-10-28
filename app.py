@@ -17,7 +17,7 @@ from export_utils import export_to_sheets
 
 load_dotenv()
 
-PAGESPEED_API_KEY = os.getenv("PAGESPEED_API_KEY")  # Put in .env
+PAGESPEED_API_KEY = os.getenv("PAGESPEED_API_KEY")
 
 st.set_page_config(page_title="SEO Auditor", layout="wide")
 
@@ -27,7 +27,9 @@ start_url = st.text_input("Enter Website URL", "https://example.com")
 max_pages = st.number_input("Max pages to crawl", 50, 2000, 300)
 run_btn = st.button("Start Crawl")
 
-# ============ PAGE FUNCTIONS ===============
+# ===========================================================
+# ANALYSIS FUNCTION
+# ===========================================================
 def analyze_results(pages, sitemap_urls=None):
     records = []
 
@@ -37,7 +39,6 @@ def analyze_results(pages, sitemap_urls=None):
         depth = data["depth"]
         load_time = data["load_time"]
 
-        # SEO
         title, title_len = extract_title(soup)
         meta_desc, meta_desc_len = extract_meta_description(soup)
         canonical = extract_canonical(soup)
@@ -49,9 +50,9 @@ def analyze_results(pages, sitemap_urls=None):
         readable = readability_score(soup)
         keywords = get_keywords(soup, top_n=10)
 
-        # PageSpeed metrics
+        # Fetch CWV if key exists
         cwv = {}
-        if PAGESPEED_API_KEY:
+        if PAGESPEED_API_KEY and status == 200:
             cwv = get_pagespeed_data(url, PAGESPEED_API_KEY)
 
         row = {
@@ -81,13 +82,13 @@ def analyze_results(pages, sitemap_urls=None):
 
     df = pd.DataFrame(records)
 
-    # Canonical mismatch
+    # Canonical Mismatch
     df["Canonical Mismatch"] = df.apply(
         lambda r: r["Canonical"] and r["Canonical"].rstrip("/") != r["URL"].rstrip("/"),
         axis=1
     )
 
-    # Orphan pages
+    # Orphans
     if sitemap_urls:
         df["In Sitemap"] = df["URL"].isin(sitemap_urls)
         df["Orphan"] = (~df["URL"].isin(sitemap_urls)) & (df["Depth"] > 1)
@@ -95,12 +96,14 @@ def analyze_results(pages, sitemap_urls=None):
         df["In Sitemap"] = False
         df["Orphan"] = False
 
-    # Page Priority
+    # Priority score
     df["Priority"] = df.apply(page_priority, axis=1)
 
     return df
 
-# ============ MAIN WORKFLOW ===============
+# ===========================================================
+# MAIN WORKFLOW
+# ===========================================================
 if run_btn:
     if not start_url.startswith("http"):
         st.error("❌ Invalid URL")
@@ -115,33 +118,86 @@ if run_btn:
     with st.spinner("🧠 Running SEO checks…"):
         df = analyze_results(crawled, sitemap_urls)
 
-    st.success("✅ Completed!")
+    st.success("✅ Crawl Complete!")
     st.dataframe(df, use_container_width=True)
 
-    # Download
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV", csv, "results.csv", "text/csv")
 
-    # Export Google Sheets
-    if st.button("Export to Google Sheets"):
-        export_to_sheets(df, "creds.json", "SEO Audit")
-        st.success("✅ Exported to Google Sheets!")
+    # ======================================================
+    # ✅ STATUS FILTERS
+    # ======================================================
+    st.subheader("HTTP Status Filters")
 
-    # Save Run
-    run_name = st.text_input("Save current run as:", "latest_audit")
+    status_filter = st.multiselect(
+        "Filter by status codes",
+        sorted(df["Status"].unique()),
+        default=sorted(df["Status"].unique())
+    )
+
+    filtered_df = df[df["Status"].isin(status_filter)]
+    st.dataframe(filtered_df, use_container_width=True)
+
+    if st.button("Export Filtered to Google Sheets"):
+        export_to_sheets(filtered_df, "creds.json", "SEO Status Export")
+        st.success("✅ Exported filtered results!")
+
+    # ======================================================
+    # ✅ BREAKDOWN TABS
+    # ======================================================
+    st.header("Status Breakdown")
+
+    tab_200, tab_301, tab_404, tab_other = st.tabs([
+        "✅ 200 OK", "➡️ 301 Redirect", "❌ 404 Not Found", "⚠️ Other"
+    ])
+
+    with tab_200:
+        d = df[df["Status"] == 200]
+        st.dataframe(d)
+        if st.button("Export 200", key="exp_200"):
+            export_to_sheets(d, "creds.json", "200 Pages")
+            st.success("✅ Exported!")
+
+    with tab_301:
+        d = df[df["Status"] == 301]
+        st.dataframe(d)
+        if st.button("Export 301", key="exp_301"):
+            export_to_sheets(d, "creds.json", "301 Pages")
+            st.success("✅ Exported!")
+
+    with tab_404:
+        d = df[df["Status"] == 404]
+        st.dataframe(d)
+        if st.button("Export 404", key="exp_404"):
+            export_to_sheets(d, "creds.json", "404 Pages")
+            st.success("✅ Exported!")
+
+    with tab_other:
+        d = df[~df["Status"].isin([200, 301, 404])]
+        st.dataframe(d)
+        if st.button("Export Other", key="exp_other"):
+            export_to_sheets(d, "creds.json", "Other Status Pages")
+            st.success("✅ Exported!")
+
+    # ======================================================
+    # ✅ SAVE RUN
+    # ======================================================
+    run_name = st.text_input("Save current run as", "latest_audit")
+
     if st.button("Save Run"):
-        f = save_run(df, run_name)
-        st.success(f"✅ Saved {run_name}!")
+        save_run(df, run_name)
+        st.success(f"✅ Saved: {run_name}")
 
     st.markdown("---")
 
-# ============ HISTORY & COMPARISON ========
+# ===========================================================
+# HISTORY + COMPARE
+# ===========================================================
 st.header("📊 Compare Historical Runs")
 
 runs = list_runs()
 if runs:
     c1, c2 = st.columns(2)
-
     with c1:
         run1 = st.selectbox("Select Run 1", runs)
     with c2:
@@ -151,26 +207,21 @@ if runs:
         df1 = load_run(run1)
         df2 = load_run(run2)
 
-        d1 = set(df1["URL"])
-        d2 = set(df2["URL"])
+        d1, d2 = set(df1["URL"]), set(df2["URL"])
 
         added = d2 - d1
         removed = d1 - d2
-        common = d1 & d2
 
         st.write("🟢 Added Pages:", added)
         st.write("🔴 Removed Pages:", removed)
 
-        # Issues change check
-        merged = df1[["URL","Priority"]].merge(
-            df2[["URL","Priority"]],
-            on="URL", 
+        merged = df1[["URL", "Priority"]].merge(
+            df2[["URL", "Priority"]],
+            on="URL",
             suffixes=("_old", "_new")
         )
 
         merged["Priority Change"] = merged["Priority_new"] - merged["Priority_old"]
         st.dataframe(merged, use_container_width=True)
-
 else:
     st.info("No history found. Run + Save first!")
-
